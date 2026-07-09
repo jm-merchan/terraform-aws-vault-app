@@ -14,7 +14,7 @@ locals {
   aws_region   = data.tfe_outputs.infra.values.aws_region
   vault_fqdn   = "${var.vault_hostname}.${var.base_domain}"
 
-  # Select image repo based on edition
+  # Image coordinates — differ between community and enterprise
   vault_image_repo = var.vault_edition == "enterprise" ? "hashicorp/vault-enterprise" : "hashicorp/vault"
   vault_image_tag  = var.vault_edition == "enterprise" ? "${var.vault_chart_version}-ent" : var.vault_chart_version
 }
@@ -51,13 +51,12 @@ provider "helm" {
   }
 }
 
-# ACME provider — staging first, switch to production by changing server_url
 provider "acme" {
   server_url = "https://acme-v02.api.letsencrypt.org/directory"
 }
 
 ################################################################################
-# Route 53 — look up the hosted zone for DNS-01 challenge
+# Route 53 — hosted zone for DNS-01 challenge
 ################################################################################
 
 data "aws_route53_zone" "base" {
@@ -66,10 +65,9 @@ data "aws_route53_zone" "base" {
 }
 
 ################################################################################
-# ACME — Let's Encrypt TLS certificate via DNS-01 (Route 53)
+# ACME — Let's Encrypt certificate via DNS-01 (Route 53)
 ################################################################################
 
-# One-time ACME account registration (private key stored in state)
 resource "tls_private_key" "acme_account" {
   algorithm = "RSA"
   rsa_bits  = 4096
@@ -84,12 +82,10 @@ resource "acme_certificate" "vault" {
   account_key_pem           = acme_registration.main.account_key_pem
   common_name               = local.vault_fqdn
   subject_alternative_names = [local.vault_fqdn]
-  # key_type "2048" = RSA-2048; ACME provider generates the cert key itself
-  key_type = "2048"
+  key_type                  = "2048"
 
   dns_challenge {
     provider = "route53"
-
     config = {
       AWS_HOSTED_ZONE_ID = data.aws_route53_zone.base.zone_id
     }
@@ -112,7 +108,7 @@ resource "kubernetes_namespace" "vault" {
 }
 
 ################################################################################
-# Kubernetes TLS secret — mounted by Vault listener
+# Kubernetes TLS secret — mounted by the Vault listener
 ################################################################################
 
 resource "kubernetes_secret" "vault_tls" {
@@ -130,7 +126,7 @@ resource "kubernetes_secret" "vault_tls" {
 }
 
 ################################################################################
-# Vault Enterprise licence secret (no-op when community)
+# Vault Enterprise licence secret (skipped for community edition)
 ################################################################################
 
 resource "kubernetes_secret" "vault_license" {
@@ -147,33 +143,9 @@ resource "kubernetes_secret" "vault_license" {
 }
 
 ################################################################################
-# Route 53 — DNS record pointing to Vault NLB
-# Created after Helm deploy so the LB hostname is known
-################################################################################
-
-resource "aws_route53_record" "vault" {
-  zone_id = data.aws_route53_zone.base.zone_id
-  name    = local.vault_fqdn
-  type    = "CNAME"
-  ttl     = 60
-  # The NLB hostname is emitted by Helm via the service status
-  records = [data.kubernetes_service.vault_lb.status[0].load_balancer[0].ingress[0].hostname]
-
-  depends_on = [helm_release.vault]
-}
-
-# Read back the Vault service to get the provisioned NLB hostname
-data "kubernetes_service" "vault_lb" {
-  metadata {
-    name      = "vault"
-    namespace = kubernetes_namespace.vault.metadata[0].name
-  }
-
-  depends_on = [helm_release.vault]
-}
-
-################################################################################
 # Helm — HashiCorp Vault
+# Values are rendered from vault-values.yaml.tpl via templatefile().
+# Edit the template file to change chart configuration — do not add set{} blocks.
 ################################################################################
 
 resource "helm_release" "vault" {
@@ -186,115 +158,43 @@ resource "helm_release" "vault" {
   wait             = true
   timeout          = 600
 
-  # --- Global ---
-  set {
-    name  = "global.tlsDisable"
-    value = "false"
-  }
-
-  # --- Server ---
-  set {
-    name  = "server.image.repository"
-    value = local.vault_image_repo
-  }
-  set {
-    name  = "server.image.tag"
-    value = local.vault_image_tag
-  }
-  set {
-    name  = "server.replicas"
-    value = tostring(var.vault_replicas)
-  }
-
-  # TLS cert from the kubernetes secret
-  set {
-    name  = "server.volumes[0].name"
-    value = "vault-tls"
-  }
-  set {
-    name  = "server.volumes[0].secret.secretName"
-    value = kubernetes_secret.vault_tls.metadata[0].name
-  }
-  set {
-    name  = "server.volumeMounts[0].name"
-    value = "vault-tls"
-  }
-  set {
-    name  = "server.volumeMounts[0].mountPath"
-    value = "/vault/tls"
-  }
-  set {
-    name  = "server.volumeMounts[0].readOnly"
-    value = "true"
-  }
-
-  # HA Raft storage
-  set {
-    name  = "server.ha.enabled"
-    value = tostring(var.vault_replicas > 1)
-  }
-  set {
-    name  = "server.ha.replicas"
-    value = tostring(var.vault_replicas)
-  }
-  set {
-    name  = "server.ha.raft.enabled"
-    value = "true"
-  }
-
-  # Listener config — HTTPS on 8200 with the Let's Encrypt cert
-  set {
-    name  = "server.extraEnvironmentVars.VAULT_ADDR"
-    value = "https://127.0.0.1:8200"
-  }
-  set {
-    name  = "server.extraEnvironmentVars.VAULT_API_ADDR"
-    value = "https://$(POD_IP):8200"
-  }
-
-  # Override listener to use the mounted TLS cert
-  set {
-    name  = "server.extraConfig"
-    value = <<-EOT
-      listener "tcp" {
-        address       = "0.0.0.0:8200"
-        tls_cert_file = "/vault/tls/tls.crt"
-        tls_key_file  = "/vault/tls/tls.key"
-      }
-    EOT
-  }
-
-  # Enterprise licence (injected via env var from secret)
-  dynamic "set" {
-    for_each = var.vault_edition == "enterprise" ? [1] : []
-    content {
-      name  = "server.enterpriseLicense.secretName"
-      value = kubernetes_secret.vault_license[0].metadata[0].name
-    }
-  }
-
-  # --- UI ---
-  set {
-    name  = "ui.enabled"
-    value = "true"
-  }
-
-  # --- Service — internet-facing AWS NLB ---
-  set {
-    name  = "server.service.type"
-    value = "LoadBalancer"
-  }
-  set {
-    name  = "server.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-type"
-    value = "nlb"
-  }
-  set {
-    name  = "server.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-scheme"
-    value = "internet-facing"
-  }
+  values = [
+    templatefile("${path.module}/vault-values.yaml.tpl", {
+      vault_image_repo   = local.vault_image_repo
+      vault_image_tag    = local.vault_image_tag
+      vault_replicas     = var.vault_replicas
+      ha_enabled         = var.vault_replicas > 1
+      tls_secret_name    = kubernetes_secret.vault_tls.metadata[0].name
+      vault_edition      = var.vault_edition
+      license_secret_name = var.vault_edition == "enterprise" ? kubernetes_secret.vault_license[0].metadata[0].name : ""
+    })
+  ]
 
   depends_on = [
     kubernetes_secret.vault_tls,
     kubernetes_namespace.vault,
   ]
+}
+
+################################################################################
+# Route 53 — CNAME pointing to the Vault NLB
+################################################################################
+
+data "kubernetes_service" "vault_lb" {
+  metadata {
+    name      = "vault"
+    namespace = kubernetes_namespace.vault.metadata[0].name
+  }
+
+  depends_on = [helm_release.vault]
+}
+
+resource "aws_route53_record" "vault" {
+  zone_id = data.aws_route53_zone.base.zone_id
+  name    = local.vault_fqdn
+  type    = "CNAME"
+  ttl     = 60
+  records = [data.kubernetes_service.vault_lb.status[0].load_balancer[0].ingress[0].hostname]
+
+  depends_on = [helm_release.vault]
 }

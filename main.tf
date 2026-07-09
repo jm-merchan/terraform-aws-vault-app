@@ -160,12 +160,13 @@ resource "helm_release" "vault" {
 
   values = [
     templatefile("${path.module}/vault-values.yaml.tpl", {
-      vault_image_repo   = local.vault_image_repo
-      vault_image_tag    = local.vault_image_tag
-      vault_replicas     = var.vault_replicas
-      ha_enabled         = var.vault_replicas > 1
-      tls_secret_name    = kubernetes_secret.vault_tls.metadata[0].name
-      vault_edition      = var.vault_edition
+      vault_image_repo    = local.vault_image_repo
+      vault_image_tag     = local.vault_image_tag
+      vault_replicas      = var.vault_replicas
+      ha_enabled          = var.vault_replicas > 1
+      tls_secret_name     = kubernetes_secret.vault_tls.metadata[0].name
+      vault_edition       = var.vault_edition
+      vault_fqdn          = local.vault_fqdn
       license_secret_name = var.vault_edition == "enterprise" ? kubernetes_secret.vault_license[0].metadata[0].name : ""
     })
   ]

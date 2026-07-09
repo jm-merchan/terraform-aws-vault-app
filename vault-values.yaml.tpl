@@ -19,14 +19,6 @@ server:
     VAULT_ADDR:     "https://127.0.0.1:8200"
     VAULT_API_ADDR: "https://$(POD_IP):8200"
 
-  # HCL listener stanza — injected verbatim via extraConfig
-  extraConfig: |
-    listener "tcp" {
-      address       = "0.0.0.0:8200"
-      tls_cert_file = "/vault/tls/tls.crt"
-      tls_key_file  = "/vault/tls/tls.key"
-    }
-
   # Mount the Let's Encrypt TLS secret
   volumes:
     - name: vault-tls
@@ -38,12 +30,20 @@ server:
       mountPath: /vault/tls
       readOnly:  true
 
-  # HA Raft
+  # PVC for Raft data — one per pod, bound to an EBS gp2 volume
+  dataStorage:
+    enabled:      true
+    size:         10Gi
+    storageClass: gp2
+    accessMode:   ReadWriteOnce
+
+  # HA Raft — single config block owns both listener and storage
   ha:
     enabled:  ${ha_enabled}
     replicas: ${vault_replicas}
     raft:
-      enabled: true
+      enabled:   true
+      setNodeId: true
       config: |
         ui = true
 
@@ -55,6 +55,12 @@ server:
 
         storage "raft" {
           path = "/vault/data"
+
+          retry_join {
+            leader_tls_servername   = "vault.${vault_fqdn}"
+            leader_client_cert_file = "/vault/tls/tls.crt"
+            leader_client_key_file  = "/vault/tls/tls.key"
+          }
         }
 
         service_registration "kubernetes" {}

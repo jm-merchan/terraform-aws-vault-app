@@ -23,15 +23,15 @@ terraform {
     }
     helm = {
       source  = "hashicorp/helm"
-      version = "~> 3.0"
+      version = "~> 3.0" # latest: 3.2.0
     }
     acme = {
       source  = "vancluever/acme"
-      version = "~> 2.0"
+      version = "~> 2.0" # latest: 2.48.2
     }
     tfe = {
       source  = "hashicorp/tfe"
-      version = "~> 0.68"
+      version = "~> 0.78" # latest: 0.78.0
     }
     tls = {
       source  = "hashicorp/tls"

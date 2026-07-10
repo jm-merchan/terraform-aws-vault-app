@@ -80,9 +80,15 @@ variable "vault_edition" {
 }
 
 variable "vault_chart_version" {
-  description = "Helm chart version for HashiCorp Vault (https://github.com/hashicorp/vault-helm)"
+  description = "Helm chart version for HashiCorp Vault (https://github.com/hashicorp/vault-helm). Chart version ≠ Vault version."
   type        = string
   default     = "0.29.1"
+}
+
+variable "vault_image_tag" {
+  description = "Docker image tag for Vault (the Vault release version, e.g. '2.0.3'). Independent from vault_chart_version."
+  type        = string
+  default     = "2.0.3"
 }
 
 variable "vault_enterprise_license" {

@@ -14,9 +14,10 @@ locals {
   aws_region   = data.tfe_outputs.infra.values.aws_region
   vault_fqdn   = "${var.vault_hostname}.${var.base_domain}"
 
-  # Image coordinates — differ between community and enterprise
+  # Image coordinates — differ between community and enterprise.
+  # vault_image_tag is independent of vault_chart_version (chart version ≠ Vault version).
   vault_image_repo = var.vault_edition == "enterprise" ? "hashicorp/vault-enterprise" : "hashicorp/vault"
-  vault_image_tag  = var.vault_edition == "enterprise" ? "${var.vault_chart_version}-ent" : var.vault_chart_version
+  vault_image_tag  = var.vault_edition == "enterprise" ? "${var.vault_image_tag}-ent" : var.vault_image_tag
 }
 
 ################################################################################

@@ -8,6 +8,7 @@
 #   - HA Raft with 3 replicas; retry_join uses the headless service (vault-internal)
 #   - StorageClass gp3 — required for EKS 1.33+ (EBS CSI driver, not in-tree)
 #   - POD_IP injected via Downward API so VAULT_API_ADDR is correct per-pod
+#   - AWS KMS auto-unseal via IRSA (no Shamir keys distributed to operators)
 ################################################################################
 
 global:
@@ -17,6 +18,14 @@ server:
   image:
     repository: "${vault_image_repo}"
     tag:        "${vault_image_tag}"
+
+  # ServiceAccount annotated with the IRSA role ARN so Vault can call KMS
+  # without static AWS credentials.
+  serviceAccount:
+    create: true
+    name: vault
+    annotations:
+      eks.amazonaws.com/role-arn: "${vault_unseal_role}"
 
   # Extra environment variables
   # POD_IP is injected via Downward API (extraEnv below) so VAULT_API_ADDR
@@ -65,10 +74,18 @@ server:
         ui = true
 
         listener "tcp" {
-          address       = "0.0.0.0:8200"
+          address         = "0.0.0.0:8200"
           cluster_address = "0.0.0.0:8201"
-          tls_cert_file = "/vault/tls/tls.crt"
-          tls_key_file  = "/vault/tls/tls.key"
+          tls_cert_file   = "/vault/tls/tls.crt"
+          tls_key_file    = "/vault/tls/tls.key"
+        }
+
+        # AWS KMS auto-unseal — Vault never requires manual unseal after restart.
+        # The IRSA role bound to the vault ServiceAccount grants kms:Encrypt,
+        # kms:Decrypt, and kms:DescribeKey on this key only.
+        seal "awskms" {
+          region     = "${kms_region}"
+          kms_key_id = "${kms_key_id}"
         }
 
         storage "raft" {

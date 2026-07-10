@@ -7,12 +7,16 @@ data "tfe_outputs" "infra" {
   workspace    = var.infra_workspace
 }
 
+data "aws_caller_identity" "current" {}
+
 locals {
-  cluster_name = data.tfe_outputs.infra.values.cluster_name
-  cluster_ep   = data.tfe_outputs.infra.values.cluster_endpoint
-  cluster_ca   = data.tfe_outputs.infra.values.cluster_certificate_authority_data
-  aws_region   = data.tfe_outputs.infra.values.aws_region
-  vault_fqdn   = "${var.vault_hostname}.${var.base_domain}"
+  cluster_name      = data.tfe_outputs.infra.values.cluster_name
+  cluster_ep        = data.tfe_outputs.infra.values.cluster_endpoint
+  cluster_ca        = data.tfe_outputs.infra.values.cluster_certificate_authority_data
+  aws_region        = data.tfe_outputs.infra.values.aws_region
+  oidc_provider     = data.tfe_outputs.infra.values.oidc_provider
+  oidc_provider_arn = data.tfe_outputs.infra.values.oidc_provider_arn
+  vault_fqdn        = "${var.vault_hostname}.${var.base_domain}"
 
   # Image coordinates — differ between community and enterprise.
   # vault_image_tag is independent of vault_chart_version (chart version ≠ Vault version).
@@ -95,6 +99,88 @@ resource "acme_certificate" "vault" {
 }
 
 ################################################################################
+# KMS key — dedicated to Vault auto-unseal (independent of the EKS cluster key)
+################################################################################
+
+resource "aws_kms_key" "vault_unseal" {
+  description             = "Vault auto-unseal key for ${local.vault_fqdn}"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = {
+    Environment = var.environment
+    Owner       = var.owner
+    CostCenter  = var.cost_center
+    Project     = var.project
+    ManagedBy   = "Terraform"
+  }
+}
+
+resource "aws_kms_alias" "vault_unseal" {
+  name          = "alias/vault/${var.vault_namespace}-unseal"
+  target_key_id = aws_kms_key.vault_unseal.key_id
+}
+
+################################################################################
+# IRSA — IAM role for the Vault server ServiceAccount to use the unseal key
+################################################################################
+
+data "aws_iam_policy_document" "vault_unseal_assume" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [local.oidc_provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_provider}:sub"
+      values   = ["system:serviceaccount:${var.vault_namespace}:vault"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_provider}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "vault_unseal" {
+  name_prefix        = "vault-unseal-"
+  assume_role_policy = data.aws_iam_policy_document.vault_unseal_assume.json
+
+  tags = {
+    Environment = var.environment
+    Owner       = var.owner
+    CostCenter  = var.cost_center
+    Project     = var.project
+    ManagedBy   = "Terraform"
+  }
+}
+
+resource "aws_iam_role_policy" "vault_unseal_kms" {
+  name = "vault-unseal-kms"
+  role = aws_iam_role.vault_unseal.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:DescribeKey",
+      ]
+      Resource = [aws_kms_key.vault_unseal.arn]
+    }]
+  })
+}
+
+################################################################################
 # Kubernetes namespace
 ################################################################################
 
@@ -170,12 +256,16 @@ resource "helm_release" "vault" {
       vault_edition       = var.vault_edition
       vault_fqdn          = local.vault_fqdn
       license_secret_name = var.vault_edition == "enterprise" ? kubernetes_secret.vault_license[0].metadata[0].name : ""
+      kms_key_id          = aws_kms_key.vault_unseal.key_id
+      kms_region          = local.aws_region
+      vault_unseal_role   = aws_iam_role.vault_unseal.arn
     })
   ]
 
   depends_on = [
     kubernetes_secret.vault_tls,
     kubernetes_namespace.vault,
+    aws_iam_role_policy.vault_unseal_kms,
   ]
 }
 
